@@ -130,8 +130,20 @@ export const openapiSpec = {
           hls_stream_url: {
             type: 'string',
             format: 'uri',
-            example: 'https://customer-id_akun_cf.cloudflarestream.com/token_signed_jwt/manifest/video.m3u8',
-            description: 'Signed URL Cloudflare Stream HLS (.m3u8) berlaku selama 2 jam.',
+            example: 'https://vz-bccc1377-9fe.b-cdn.net/8f4b0d87-1941-4775-8025-a461b72b84eb/playlist.m3u8?token=5bca...&expires=1731580000',
+            description: 'Signed URL Bunny.net Stream HLS (.m3u8) berlaku selama 2 jam.',
+          },
+          embed_player_url: {
+            type: 'string',
+            format: 'uri',
+            example: 'https://iframe.mediadelivery.net/embed/809020/8f4b0d87-1941-4775-8025-a461b72b84eb?token=abc...&expires=1731580000',
+            description: 'URL Iframe Web Embed Player resmi Bunny.net siap pakai.',
+          },
+          thumbnail_url: {
+            type: 'string',
+            format: 'uri',
+            example: 'https://vz-bccc1377-9fe.b-cdn.net/8f4b0d87-1941-4775-8025-a461b72b84eb/thumbnail.jpg',
+            description: 'URL gambar thumbnail cover video dari CDN Bunny.net.',
           },
           expires_in_seconds: { type: 'integer', example: 7200 },
           summary_markdown: { type: 'string', example: '### Rumus Limit Trigonometri\n$$\\lim_{x \\to 0} \\frac{\\sin ax}{bx} = \\frac{a}{b}$$' },
@@ -374,16 +386,34 @@ export const openapiSpec = {
         },
       },
     },
+    '/api/courses/videos/{id}': {
+      get: {
+        tags: ['Courses'],
+        summary: 'Detail metadata materi video & bab (tanpa play stream)',
+        description: 'Mengambil detail judul, deskripsi, nama tutor, status gratis/berbayar, daftar bab, dan catatan rumus materi tanpa memvalidasi langganan (untuk tampilan preview materi).',
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' }, description: 'ID video materi' },
+        ],
+        responses: {
+          200: {
+            description: 'Detail video berhasil dimuat',
+          },
+          404: {
+            description: 'Video tidak ditemukan',
+          },
+        },
+      },
+    },
     '/api/courses/videos/{id}/play': {
       get: {
         tags: ['Courses'],
-        summary: 'Putar video: Signed HLS Stream URL (.m3u8)',
+        summary: 'Putar video: Bunny.net Signed HLS Stream URL (.m3u8)',
         description: `
 Endpoint aman untuk memutar video materi:
 1. Memverifikasi Bearer Token JWT dan mengecek kesesuaian header \`X-Device-ID\` (*Single Device Binding*).
 2. Mengecek apakah video berlabel gratis (\`is_free = true\`).
 3. Jika video berbayar, mengecek masa aktif langganan pengguna (\`subscription_valid_until > NOW()\`). Tolak dengan \`402 PAYMENT_REQUIRED\` jika belum langganan.
-4. Menghasilkan *Cloudflare Stream Signed URL* berdurasi 2 jam beserta bab navigasi dan catatan rumus digital.
+4. Menghasilkan *Bunny.net Stream Signed HLS URL* & *Embed Player URL* berdurasi 2 jam beserta bab navigasi dan catatan rumus digital.
         `,
         security: [{ BearerAuth: [], DeviceIdAuth: [] }],
         parameters: [
@@ -890,6 +920,74 @@ Endpoint aman untuk memutar video materi:
         responses: {
           200: {
             description: 'Laporan royalti tutor berhasil dihitung',
+          },
+        },
+      },
+    },
+    '/api/admin/videos': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Daftarkan video materi baru dari Bunny.net Stream',
+        description: 'Digunakan oleh tim tech setelah upload file video di panel Bunny.net. Menerima GUID video dari Bunny.net beserta judul, mata kuliah, tutor, dan bab/chapters.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  course_id: { type: 'string', format: 'uuid', example: 'd0e12345-6789-4abc-def0-123456789abc' },
+                  tutor_id: { type: 'string', format: 'uuid', example: 'b0e12345-6789-4abc-def0-123456789def' },
+                  title: { type: 'string', example: 'Turunan Implisit & Masalah Terkait' },
+                  category: { type: 'string', enum: ['MATERI', 'UTS', 'UAS'], example: 'MATERI' },
+                  university_tag: { type: 'string', enum: ['UNRI', 'UIN_SUSKA', 'PCR', 'UIR'], example: 'UNRI' },
+                  duration_seconds: { type: 'integer', example: 480 },
+                  bunny_video_id: { type: 'string', example: '8f4b0d87-1941-4775-8025-a461b72b84eb' },
+                  summary_markdown: { type: 'string', example: '$$\\frac{dy}{dx} = -\\frac{F_x}{F_y}$$' },
+                  is_free: { type: 'boolean', example: false },
+                  sort_order: { type: 'integer', example: 1 },
+                  chapters: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        title: { type: 'string', example: 'Konsep Dasar' },
+                        start_second: { type: 'integer', example: 0 },
+                        sort_order: { type: 'integer', example: 1 },
+                      },
+                    },
+                  },
+                },
+                required: ['course_id', 'tutor_id', 'title', 'duration_seconds', 'bunny_video_id'],
+              },
+            },
+          },
+        },
+        responses: {
+          201: {
+            description: 'Video berhasil didaftarkan',
+          },
+        },
+      },
+      get: {
+        tags: ['Admin'],
+        summary: 'Daftar seluruh video materi yang terdaftar',
+        description: 'Melihat seluruh video yang ada di database beserta ID video Bunny.net dan status tayang.',
+        responses: {
+          200: {
+            description: 'Daftar video berhasil dimuat',
+          },
+        },
+      },
+    },
+    '/api/admin/metadata-helpers': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Data helper ID Mata Kuliah & Tutor',
+        description: 'Mempermudah tim tech untuk mengambil daftar ID Mata Kuliah dan ID Tutor saat ingin mendaftarkan video baru.',
+        responses: {
+          200: {
+            description: 'Data helper berhasil dimuat',
           },
         },
       },

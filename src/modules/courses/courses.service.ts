@@ -1,7 +1,7 @@
 import { eq, and, asc, isNull, or } from 'drizzle-orm';
 import { db } from '../../db';
 import { courses, videos, videoChapters, users, tutors } from '../../db/schema';
-import { generateSignedHlsUrl } from '../../utils/cloudflare';
+import { generateBunnySignedHlsUrl } from '../../utils/bunny';
 import type { VideoFilterQuery } from './courses.schema';
 
 export class CourseService {
@@ -67,7 +67,64 @@ export class CourseService {
   }
 
   /**
-   * Endpoint Play Video: Memeriksa hak akses sebelum memberikan Cloudflare Stream Signed URL.
+   * Mengambil detail satu video (metadata, tutor, bab/chapters, dan catatan rumus)
+   * tanpa menerbitkan token pemutaran stream.
+   */
+  async getVideoDetail(videoId: string) {
+    const [video] = await db
+      .select({
+        id: videos.id,
+        courseId: videos.courseId,
+        courseTitle: courses.title,
+        courseSymbol: courses.symbol,
+        tutorId: tutors.id,
+        tutorName: users.fullName,
+        tutorBio: tutors.bioTitle,
+        title: videos.title,
+        category: videos.category,
+        universityTag: videos.universityTag,
+        durationSeconds: videos.durationSeconds,
+        summaryMarkdown: videos.summaryMarkdown,
+        isFree: videos.isFree,
+        isPublished: videos.isPublished,
+        sortOrder: videos.sortOrder,
+        createdAt: videos.createdAt,
+      })
+      .from(videos)
+      .innerJoin(courses, eq(videos.courseId, courses.id))
+      .innerJoin(tutors, eq(videos.tutorId, tutors.id))
+      .innerJoin(users, eq(tutors.userId, users.id))
+      .where(and(eq(videos.id, videoId), eq(videos.isPublished, true)))
+      .limit(1);
+
+    if (!video) {
+      throw new CourseError('VIDEO_NOT_FOUND', 'Video materi yang kamu cari tidak ditemukan atau belum tayang.', 404);
+    }
+
+    const chapters = await db
+      .select({
+        id: videoChapters.id,
+        title: videoChapters.title,
+        startSecond: videoChapters.startSecond,
+        sortOrder: videoChapters.sortOrder,
+      })
+      .from(videoChapters)
+      .where(eq(videoChapters.videoId, video.id))
+      .orderBy(asc(videoChapters.sortOrder), asc(videoChapters.startSecond));
+
+    return {
+      ...video,
+      chapters: chapters.map((ch) => ({
+        id: ch.id,
+        title: ch.title,
+        start_second: ch.startSecond,
+        sort_order: ch.sortOrder,
+      })),
+    };
+  }
+
+  /**
+   * Endpoint Play Video: Memeriksa hak akses sebelum memberikan Bunny.net Stream Signed URL.
    */
   async getPlayVideo(videoId: string, userId: string) {
     // 1. Ambil data video
@@ -89,7 +146,7 @@ export class CourseService {
       .limit(1);
 
     if (!video) {
-      throw new CourseError('VIDEO_NOT_FOUND', 'Video materi yang kamu cari tidak ditemukan atau belum tayang.');
+      throw new CourseError('VIDEO_NOT_FOUND', 'Video materi yang kamu cari tidak ditemukan atau belum tayang.', 404);
     }
 
     // 2. Cek apakah video berbayar dan user belum berlangganan
@@ -126,8 +183,8 @@ export class CourseService {
       .where(eq(videoChapters.videoId, video.id))
       .orderBy(asc(videoChapters.sortOrder), asc(videoChapters.startSecond));
 
-    // 4. Generate Cloudflare Stream Signed HLS URL (berlaku 2 jam)
-    const signedHlsUrl = await generateSignedHlsUrl(video.cfVideoUid, 7200);
+    // 4. Generate Bunny.net Stream Signed HLS URL & Embed Player URL (berlaku 2 jam)
+    const bunnyStream = generateBunnySignedHlsUrl(video.cfVideoUid, 7200);
 
     return {
       video_id: video.id,
@@ -136,7 +193,9 @@ export class CourseService {
       university_tag: video.universityTag,
       duration_seconds: video.durationSeconds,
       is_free: video.isFree,
-      hls_stream_url: signedHlsUrl,
+      hls_stream_url: bunnyStream.hls_url,
+      embed_player_url: bunnyStream.embed_url,
+      thumbnail_url: bunnyStream.thumbnail_url,
       expires_in_seconds: 7200,
       summary_markdown: video.summaryMarkdown,
       chapters: chapters.map((ch) => ({
