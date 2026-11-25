@@ -41,6 +41,21 @@ courses.get(
   }
 );
 
+// GET /api/courses/videos/:id — Detail informasi materi video & bab (tanpa play)
+courses.get('/videos/:id', async (c) => {
+  const videoId = c.req.param('id');
+  try {
+    const video = await courseService.getVideoDetail(videoId);
+    return successResponse(c, video, 'Detail video berhasil dimuat.');
+  } catch (err) {
+    if (err instanceof CourseError) {
+      return errorResponse(c, err.code, err.message, err.status);
+    }
+    console.error('[COURSES] getVideoDetail error:', err);
+    return errorResponse(c, 'INTERNAL_ERROR', 'Gagal memuat detail video.', 500);
+  }
+});
+
 // GET /api/courses/videos/:id/play — Stream video HLS terenkripsi (Anti-Piracy)
 courses.get('/videos/:id/play', authMiddleware, deviceMiddleware, async (c) => {
   const videoId = c.req.param('id');

@@ -16,7 +16,13 @@ const envSchema = z.object({
   MIDTRANS_IS_PRODUCTION: z.coerce.boolean().default(false),
   MIDTRANS_WEBHOOK_SECRET: z.string().default('dummy_midtrans_webhook_secret'),
 
-  // Cloudflare Stream (VOD)
+  // Bunny.net Stream (VOD)
+  BUNNY_STREAM_LIBRARY_ID: z.string().default('809020'),
+  BUNNY_STREAM_CDN_HOSTNAME: z.string().default('vz-bccc1377-9fe.b-cdn.net'),
+  BUNNY_STREAM_API_KEY: z.string().default('dummy_bunny_api_key'),
+  BUNNY_STREAM_TOKEN_KEY: z.string().default('dummy_bunny_token_key'),
+
+  // Cloudflare Stream (Legacy fallback)
   CF_ACCOUNT_ID: z.string().default('dummy_cf_account_id'),
   CF_API_TOKEN: z.string().default('dummy_cf_api_token'),
   CF_STREAM_SIGNING_KEY_ID: z.string().default('dummy_cf_key_id'),
