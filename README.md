@@ -10,8 +10,8 @@ Dibangun dengan arsitektur **Feature-First Modular Monolith** menggunakan perfor
 
 - **🛡️ Anti-Pembajakan Konten (Single Device Binding):**
   Setiap akun mahasiswa hanya dapat aktif pada **1 perangkat fisik** sekaligus via header `X-Device-ID`. Jika perangkat tidak cocok, request langsung ditolak dengan HTTP `403 DEVICE_MISMATCH`. Prosedur pergantian HP dilindungi verifikasi OTP email.
-- **🔒 Signed HLS Video Stream:**
-  Video disimpan secara aman di Cloudflare Stream tanpa mempublikasikan URL video asli. API hanya menerbitkan token URL bertanda tangan kriptografis (*HMAC SHA-256 Signed HLS URL* `.m3u8`) dengan masa kedaluwarsa 2 jam khusus untuk pengguna berlangganan aktif (`is_free = false` dicek via `subscription_valid_until`).
+- **🔒 Signed HLS Video Stream (Bunny.net Stream):**
+  Video disimpan secara aman di Bunny.net Stream tanpa mempublikasikan URL video asli. API menerbitkan token URL bertanda tangan kriptografis (*SHA-256 Token Authentication Signed HLS URL* `.m3u8` & *Embed Player URL*) dengan masa kedaluwarsa 2 jam khusus untuk pengguna berlangganan aktif (`is_free = false` dicek via `subscription_valid_until`).
 - **💳 Transaksi Keuangan ACID (Midtrans Dynamic QRIS):**
   Integrasi pembayaran QRIS langganan Rp25.000/bulan dengan validasi kuota & diskon voucher promo (`PANAM10`, `UINSUSKA`). Pemrosesan webhook Midtrans tervalidasi tanda tangan SHA-512 dan dieksekusi secara atomik (`db.transaction`) untuk mencegah *double claim*.
 - **📊 Poling Status & Riwayat Pembayaran:**
@@ -37,7 +37,7 @@ Dibangun dengan arsitektur **Feature-First Modular Monolith** menggunakan perfor
 | **Data Validation** | [Zod](https://zod.dev/) & `@hono/zod-validator` |
 | **Payment Gateway** | [Midtrans](https://midtrans.com/) (Dynamic QRIS / Core API) |
 | **Email Service** | [Resend](https://resend.com/) (Email OTP Transactional) |
-| **Video Infrastructure** | [Cloudflare Stream](https://www.cloudflare.com/products/cloudflare-stream/) (HLS Signed URL) |
+| **Video Infrastructure** | [Bunny.net Stream](https://bunny.net/stream/) (HLS Signed URL & Token Authentication) |
 | **Documentation** | OpenAPI 3.0.3 & Custom Swagger UI |
 
 ---
@@ -81,7 +81,7 @@ takluk_be/
 │   │   └── progress/           # Sync Riwayat Tontonan & Bookmark
 │   ├── utils/
 │   │   ├── api-response.ts     # Helper JSON Response Sukses/Gagal
-│   │   ├── cloudflare.ts       # HMAC SHA-256 Cloudflare Stream Signed URL
+│   │   ├── bunny.ts            # SHA-256 Bunny.net Stream Signed HLS & Embed URL
 │   │   ├── jwt.ts              # Generator & Verifier JWT Token (HS256)
 │   │   └── otp.ts              # Generator OTP 6 Digit & Template HTML Email
 │   └── index.ts                # Server Entry Point Hono (CORS, Logger, Routes)
@@ -138,11 +138,11 @@ MIDTRANS_CLIENT_KEY=SB-Mid-client-xxxxxxxxxxxxxxxxxxxx
 MIDTRANS_IS_PRODUCTION=false
 MIDTRANS_WEBHOOK_SECRET=token_verifikasi_webhook_anda
 
-# Cloudflare Stream
-CF_ACCOUNT_ID=id_akun_cloudflare
-CF_API_TOKEN=token_api_cloudflare
-CF_STREAM_SIGNING_KEY_ID=key_id_cloudflare
-CF_STREAM_SIGNING_KEY_JWK=base64_jwk_cloudflare_signing_key
+# Bunny.net Stream
+BUNNY_STREAM_LIBRARY_ID=809020
+BUNNY_STREAM_CDN_HOSTNAME=vz-bccc1377-9fe.b-cdn.net
+BUNNY_STREAM_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+BUNNY_STREAM_TOKEN_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
 > **💡 Catatan Mode Development:**
@@ -228,7 +228,8 @@ Semua respons API mengikuti standar kontrak seragam:
 | :--- | :--- | :---: | :--- |
 | `GET` | `/api/courses` | Publik | Katalog seluruh mata kuliah aktif diurutkan berurutan |
 | `GET` | `/api/courses/videos` | Publik | Filter video berdasarkan `course_id`, `category` (MATERI/UTS/UAS), & kampus |
-| `GET` | `/api/courses/videos/:id/play` | JWT + Device | Signed HLS URL (.m3u8), chapters, & rumus LaTeX (402 jika terkunci) |
+| `GET` | `/api/courses/videos/:id` | Publik | Detail metadata video, tutor, bab/chapters & ringkasan rumus (tanpa play) |
+| `GET` | `/api/courses/videos/:id/play` | JWT + Device | Bunny.net Signed HLS URL (.m3u8), Embed URL, chapters, & rumus (402 jika terkunci) |
 
 ### 4. Progres Belajar & Royalti (`/api/progress`)
 | Method | Endpoint | Auth | Deskripsi |
@@ -251,9 +252,12 @@ Semua respons API mengikuti standar kontrak seragam:
 | `GET` | `/api/payments/:invoice_number/status` | JWT + Device | Endpoint polling ringan aplikasi Flutter untuk status invoice |
 | `POST` | `/api/payments/webhook` | Publik | Webhook verifikasi signature SHA-512 Midtrans & perpanjang langganan 30 hari |
 
-### 7. Laporan Royalti Tutor (`/api/admin`)
+### 7. Manajemen Admin & Video (`/api/admin`)
 | Method | Endpoint | Auth | Deskripsi |
 | :--- | :--- | :---: | :--- |
+| `GET` | `/api/admin/metadata-helpers` | Admin | Helper ID Mata Kuliah & Tutor untuk mempermudah pendaftaran video |
+| `POST` | `/api/admin/videos` | Admin | Daftarkan metadata video yang sudah di-upload di panel Bunny.net |
+| `GET` | `/api/admin/videos` | Admin | Daftar seluruh video yang tersimpan di database beserta Bunny Video ID |
 | `GET` | `/api/admin/royalties/monthly` | Admin | Laporan bagi hasil proporsional dari Pool Royalti Rp3,5 Juta per bulan |
 
 ### 8. Panam Academy Hub O2O (`/api/hub`)
