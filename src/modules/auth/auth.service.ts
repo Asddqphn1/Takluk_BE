@@ -1,82 +1,93 @@
-import { eq, and, gt, sql } from 'drizzle-orm';
+import { and, eq, gt, sql } from 'drizzle-orm';
 import { db } from '../../db';
 import { users, emailOtps } from '../../db/schema';
-import { env } from '../../config/env';
 import { generateOtpCode, generateReferralCode, buildOtpEmailHtml } from '../../utils/otp';
 import { createJwt } from '../../utils/jwt';
-import { Resend } from 'resend';
 import type { VerifyOtpInput } from './auth.schema';
 
-const resend = new Resend(env.RESEND_API_KEY);
-
-export class AuthService {
-  /**
-   * Generate a 6-digit OTP code, save to email_otps, and send via Resend email.
-   * In development mode with RESEND_API_KEY starting with 're_test', uses dummy OTP '123456'.
-   */
-  async requestOtp(email: string): Promise<{ message: string }> {
-    const [recentOtp] = await db
-      .select({ id: emailOtps.id, createdAt: emailOtps.createdAt })
-      .from(emailOtps)
-      .where(
-        and(
-          eq(emailOtps.email, email),
-          eq(emailOtps.isUsed, false),
-          gt(emailOtps.expiresAt, new Date())
-        )
-      )
-      .orderBy(sql`${emailOtps.createdAt} DESC`)
-      .limit(1);
-
-    if (recentOtp) {
-      const timeDiff = Date.now() - new Date(recentOtp.createdAt).getTime();
-      if (timeDiff < 60_000) {
-        return {
-          message: 'Kode OTP sudah dikirim ke email kamu. Cek inbox atau tunggu 60 detik untuk kirim ulang ya!',
-        };
-      }
-    }
-
-    const isDev = env.NODE_ENV === 'development';
-    const otpCode = isDev ? '123456' : generateOtpCode();
-
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-
-    await db.insert(emailOtps).values({
-      email,
-      otpCode,
-      expiresAt,
-    });
-
-    const [existingUser] = await db
-      .select({ fullName: users.fullName })
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
-
-    if (!isDev || !env.RESEND_API_KEY.startsWith('re_test')) {
-      try {
-        await resend.emails.send({
-          from: env.EMAIL_FROM,
-          to: email,
-          subject: `${otpCode} — Kode Verifikasi Takluk`,
-          html: buildOtpEmailHtml(otpCode, existingUser?.fullName),
-        });
-      } catch (emailError) {
-        console.error('[AUTH] Failed to send OTP email:', emailError);
-      }
-    } else {
-      console.log(`[DEV] OTP for ${email}: ${otpCode}`);
-    }
-
-    return {
-      message: 'Kode OTP berhasil dikirim ke email kamu. Cek inbox ya!',
-    };
+async function sendOtpEmail(email: string, html: string): Promise<void> {
+  const { GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, GMAIL_SENDER } = process.env;
+  if (!GMAIL_CLIENT_ID || !GMAIL_CLIENT_SECRET || !GMAIL_REFRESH_TOKEN || !GMAIL_SENDER) {
+    throw new Error('Konfigurasi OAuth Gmail Takluk belum lengkap.');
+  }
+  if ([email, GMAIL_SENDER].some(value => /[\r\n,;<>]/.test(value))) {
+    throw new Error('Alamat pengirim atau penerima OTP tidak valid.');
   }
 
-  /**
-   * Verify OTP, register or update user profile, bind device, and issue JWT.
-   */
+  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    body: new URLSearchParams({
+      client_id: GMAIL_CLIENT_ID,
+      client_secret: GMAIL_CLIENT_SECRET,
+      refresh_token: GMAIL_REFRESH_TOKEN,
+      grant_type: 'refresh_token',
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!tokenResponse.ok) {
+    throw new Error(`OAuth Gmail menolak permintaan token (HTTP ${tokenResponse.status}).`);
+  }
+  const token = await tokenResponse.json() as { access_token?: string };
+  if (!token.access_token) throw new Error('OAuth Gmail tidak mengembalikan access token.');
+
+  const encodedHtml = Buffer.from(html, 'utf8').toString('base64');
+  const message = [
+    `From: Takluk RuangKuliah <${GMAIL_SENDER}>`,
+    `To: ${email}`,
+    'Subject: Kode Verifikasi Takluk',
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    (encodedHtml.match(/.{1,76}/g) ?? []).join('\r\n'),
+  ].join('\r\n');
+  const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token.access_token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ raw: Buffer.from(message, 'utf8').toString('base64url') }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!response.ok) throw new Error(`Gmail menolak pengiriman OTP (HTTP ${response.status}).`);
+}
+
+export class AuthService {
+  async requestOtp(email: string): Promise<{ message: string }> {
+    return db.transaction(async (tx) => {
+      // Serialize requests for this address so retries observe the same cooldown.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${email}))`);
+      const [recentOtp] = await tx
+        .select({ createdAt: emailOtps.createdAt })
+        .from(emailOtps)
+        .where(and(
+          eq(emailOtps.email, email),
+          eq(emailOtps.isUsed, false),
+          gt(emailOtps.expiresAt, new Date()),
+        ))
+        .orderBy(sql`${emailOtps.createdAt} DESC`)
+        .limit(1);
+
+      if (recentOtp && Date.now() - new Date(recentOtp.createdAt).getTime() < 60_000) {
+        return { message: 'Kode OTP sudah diminta. Cek inbox atau tunggu 60 detik untuk kirim ulang ya!' };
+      }
+
+      const [existingUser] = await tx.select({ fullName: users.fullName })
+        .from(users).where(eq(users.email, email)).limit(1);
+      const otpCode = generateOtpCode();
+      await tx.insert(emailOtps).values({
+        email,
+        otpCode,
+        expiresAt: new Date(Date.now() + 5 * 60_000),
+      });
+
+      // On a rejected send the transaction rolls back, allowing an immediate retry.
+      await sendOtpEmail(email, buildOtpEmailHtml(otpCode, existingUser?.fullName));
+      return { message: 'Kode OTP berhasil dikirim ke email kamu. Cek inbox ya!' };
+    });
+  }
+
   async verifyOtp(input: VerifyOtpInput): Promise<{
     token: string;
     user: {
@@ -91,123 +102,71 @@ export class AuthService {
       is_new_user: boolean;
     };
   }> {
-    const [otpRecord] = await db
-      .select()
-      .from(emailOtps)
-      .where(
-        and(
-          eq(emailOtps.email, input.email),
-          eq(emailOtps.isUsed, false),
-          gt(emailOtps.expiresAt, new Date())
-        )
-      )
+    const [otpRecord] = await db.select().from(emailOtps)
+      .where(and(
+        eq(emailOtps.email, input.email),
+        eq(emailOtps.isUsed, false),
+        gt(emailOtps.expiresAt, new Date()),
+      ))
       .orderBy(sql`${emailOtps.createdAt} DESC`)
       .limit(1);
 
     if (!otpRecord) {
-      throw new OtpError(
-        'OTP_EXPIRED',
-        'Kode OTP sudah kedaluwarsa atau belum diminta. Kirim ulang OTP ya!'
-      );
+      throw new OtpError('OTP_EXPIRED', 'Kode OTP sudah kedaluwarsa atau belum diminta. Kirim ulang OTP ya!');
     }
-
     if (otpRecord.attempts >= 5) {
-      await db
-        .update(emailOtps)
-        .set({ isUsed: true })
-        .where(eq(emailOtps.id, otpRecord.id));
-
-      throw new OtpError(
-        'OTP_MAX_ATTEMPTS',
-        'Kamu sudah 5 kali salah memasukkan kode. Minta kode OTP baru ya!'
-      );
+      await db.update(emailOtps).set({ isUsed: true }).where(eq(emailOtps.id, otpRecord.id));
+      throw new OtpError('OTP_MAX_ATTEMPTS', 'Kamu sudah 5 kali salah memasukkan kode. Minta kode OTP baru ya!');
     }
-
     if (otpRecord.otpCode !== input.otp_code) {
-      await db
-        .update(emailOtps)
+      await db.update(emailOtps)
         .set({ attempts: sql`${emailOtps.attempts} + 1` })
         .where(eq(emailOtps.id, otpRecord.id));
-
       const remaining = 4 - otpRecord.attempts;
-      throw new OtpError(
-        'OTP_INVALID',
-        `Kode OTP salah. Kamu punya ${remaining} kesempatan lagi.`
-      );
+      throw new OtpError('OTP_INVALID', `Kode OTP salah. Kamu punya ${remaining} kesempatan lagi.`);
     }
 
-    await db
-      .update(emailOtps)
-      .set({ isUsed: true })
-      .where(eq(emailOtps.id, otpRecord.id));
+    await db.update(emailOtps).set({ isUsed: true }).where(eq(emailOtps.id, otpRecord.id));
+    const [existingUser] = await db.select().from(users).where(eq(users.email, input.email)).limit(1);
 
-    const [existingUser] = await db
-      .select()
-      .from(users)
-      .where(eq(users.email, input.email))
-      .limit(1);
-
-    let userId: string;
-    let isNewUser = false;
     let userData: typeof existingUser;
-
+    let isNewUser = false;
     if (existingUser) {
       const updateData: Record<string, unknown> = {
         activeDeviceId: input.device_id,
         deviceUpdatedAt: new Date(),
         updatedAt: new Date(),
       };
-
       if (input.full_name) updateData.fullName = input.full_name;
       if (input.nim) updateData.nim = input.nim;
       if (input.university) updateData.university = input.university;
       if (input.semester) updateData.semester = input.semester;
       if (input.phone_number !== undefined) updateData.phoneNumber = input.phone_number;
-
-      const [updated] = await db
-        .update(users)
-        .set(updateData)
-        .where(eq(users.id, existingUser.id))
-        .returning();
-
-      userId = existingUser.id;
-      userData = updated;
+      [userData] = await db.update(users).set(updateData)
+        .where(eq(users.id, existingUser.id)).returning();
     } else {
       if (!input.full_name || !input.nim) {
-        throw new OtpError(
-          'PROFILE_REQUIRED',
-          'Karena ini pertama kali kamu masuk, lengkapi nama dan NIM kamu ya!'
-        );
+        throw new OtpError('PROFILE_REQUIRED', 'Karena ini pertama kali kamu masuk, lengkapi nama dan NIM kamu ya!');
       }
-
-      const referralCode = generateReferralCode(input.full_name);
-
-      const [newUser] = await db
-        .insert(users)
-        .values({
-          email: input.email,
-          fullName: input.full_name,
-          nim: input.nim,
-          university: input.university ?? 'UIN_SUSKA',
-          semester: input.semester ?? 1,
-          phoneNumber: input.phone_number ?? null,
-          activeDeviceId: input.device_id,
-          deviceUpdatedAt: new Date(),
-          referralCode,
-        })
-        .returning();
-
-      userId = newUser.id;
-      userData = newUser;
+      [userData] = await db.insert(users).values({
+        email: input.email,
+        fullName: input.full_name,
+        nim: input.nim,
+        university: input.university ?? 'UIN_SUSKA',
+        semester: input.semester ?? 1,
+        phoneNumber: input.phone_number ?? null,
+        activeDeviceId: input.device_id,
+        deviceUpdatedAt: new Date(),
+        referralCode: generateReferralCode(input.full_name),
+      }).returning();
       isNewUser = true;
     }
 
-    const token = await createJwt(userId, userData.email, userData.role);
-
+    const token = await createJwt(userData.id, userData.email, userData.role);
     return {
       token,
       user: {
-        id: userId,
+        id: userData.id,
         email: userData.email,
         full_name: userData.fullName,
         nim: userData.nim,
@@ -222,10 +181,7 @@ export class AuthService {
 }
 
 export class OtpError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string
-  ) {
+  constructor(public readonly code: string, message: string) {
     super(message);
     this.name = 'OtpError';
   }
